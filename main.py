@@ -637,7 +637,7 @@ async def open_csv(csv_file: str):
     Reads from /CSV/ folder.
     """
 
-    if csv_file not in ["tailand_data_bangkok", "thailand_data_phuket"]:
+    if csv_file not in ["thailand_data_bangkok", "thailand_data_phuket"]:
         raise HTTPException(status_code=400, detail="Invalid CSV name")
 
     csv_filename = "tailand_data_bangkok.csv" if csv_file == "tailand_data_bangkok" else "thailand_data_phuket.csv"
