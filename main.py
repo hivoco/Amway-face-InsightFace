@@ -540,7 +540,7 @@ async def update_csv_record(
 ):
     """
     Update CSV record with new phone number and photo.
-    - csv_file must be 'tailand_data_bangkok' or 'thailand_data_phuket'
+    - csv_file must be 'thailand_data_bangkok' or 'thailand_data_phuket'
     """
     if not ada_no:
         raise HTTPException(status_code=400, detail="ada_no is required")
@@ -548,10 +548,10 @@ async def update_csv_record(
     if not new_number:
         raise HTTPException(status_code=400, detail="new_number is required")
 
-    if csv_file not in ["tailand_data_bangkok", "thailand_data_phuket"]:
+    if csv_file not in ["thailand_data_bangkok", "thailand_data_phuket"]:
         raise HTTPException(
             status_code=400,
-            detail="csv_file must be 'tailand_data_bangkok' or 'thailand_data_phuket'"
+            detail="csv_file must be 'thailand_data_bangkok' or 'thailand_data_phuket'"
         )
 
     try:
@@ -640,7 +640,7 @@ async def open_csv(csv_file: str):
     if csv_file not in ["thailand_data_bangkok", "thailand_data_phuket"]:
         raise HTTPException(status_code=400, detail="Invalid CSV name")
 
-    csv_filename = "tailand_data_bangkok.csv" if csv_file == "tailand_data_bangkok" else "thailand_data_phuket.csv"
+    csv_filename = "thailand_data_bangkok.csv" if csv_file == "thailand_data_bangkok" else "thailand_data_phuket.csv"
     csv_path = os.path.join(CSV_FOLDER, csv_filename)
 
     if not os.path.exists(csv_path):

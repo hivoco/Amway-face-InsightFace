@@ -19,10 +19,10 @@ class CSVHandler:
     
     def get_csv_path(self, csv_file: str) -> str:
         """Get CSV file path"""
-        if csv_file not in ["tailand_data_bangkok", "thailand_data_phuket"]:
-            raise ValueError("csv_file must be 'tailand_data_bangkok' or 'thailand_data_phuket'")
+        if csv_file not in ["thailand_data_bangkok", "thailand_data_phuket"]:
+            raise ValueError("csv_file must be 'thailand_data_bangkok' or 'thailand_data_phuket'")
         
-        csv_filename = "tailand_data_bangkok.csv" if csv_file == "tailand_data_bangkok" else "thailand_data_phuket.csv"
+        csv_filename = "thailand_data_bangkok.csv" if csv_file == "thailand_data_bangkok" else "thailand_data_phuket.csv"
         return os.path.join(CSV_FOLDER, csv_filename)
     
     async def upload_image_to_s3(self, file: UploadFile, ada_no: str) -> str:
