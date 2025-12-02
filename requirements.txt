@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+pandas
+numpy
+opencv-python
+Pillow
+boto3
+python-dotenv
+python-multipart
+insightface
+onnxruntime
+faiss-cpu
