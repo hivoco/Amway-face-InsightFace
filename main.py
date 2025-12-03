@@ -200,25 +200,92 @@ async def process_zip_in_background(job_id: str, zip_path: str):
     try:
         update_job_status(job_id, JobStatus.PROCESSING, progress=0)
 
+        processed_images = []
+        failed_images = []
+        total_faces = 0
+
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            all_files = [f for f in zip_ref.namelist() if f.lower().endswith((".jpg", ".jpeg", ".png"))]
+            all_files = [
+                f for f in zip_ref.namelist()
+                if f.lower().endswith((".jpg", ".jpeg", ".png"))
+            ]
+
+            total_files = len(all_files)
 
             for idx, filename in enumerate(all_files):
                 try:
+                    # Read image bytes from ZIP file
                     with zip_ref.open(filename) as img_file:
                         image_bytes = img_file.read()
 
-                    # process image embeddings, add to FAISS, etc.
+                    # Extract embeddings
+                    embeddings = extract_face_embeddings(image_bytes)
+
+                    if not embeddings:
+                        failed_images.append({
+                            "filename": filename,
+                            "reason": "No faces detected"
+                        })
+                        continue
+
+                    # Upload image to S3
+                    s3_url = upload_to_s3(image_bytes, filename)
+
+                    # Store each detected face embedding
+                    for face_idx, emb in enumerate(embeddings):
+                        emb = emb.reshape(1, -1)
+                        index.add(emb)
+
+                        metadata.append({
+                            "image_url": s3_url,
+                            "original_filename": os.path.basename(filename),
+                            "uploaded_at": datetime.now().isoformat(),
+                            "face_index": face_idx,
+                            "face_count": len(embeddings),
+                            "job_id": job_id
+                        })
+
+                        total_faces += 1
+
+                    processed_images.append({
+                        "filename": filename,
+                        "faces_detected": len(embeddings),
+                        "s3_url": s3_url
+                    })
 
                 except Exception as e:
-                    # handle failed images
+                    failed_images.append({
+                        "filename": filename,
+                        "reason": str(e)
+                    })
 
-                    update_job_status(job_id, JobStatus.PROCESSING, progress=int((idx+1)/len(all_files)*100))
+                # update progress
+                progress = int(((idx + 1) / total_files) * 100)
+                update_job_status(job_id, JobStatus.PROCESSING, progress=progress)
 
-        update_job_status(job_id, JobStatus.COMPLETED)
+        # Save index & metadata
+        if total_faces > 0:
+            save_index()
+
+        update_job_status(
+            job_id,
+            JobStatus.COMPLETED,
+            progress=100,
+            total_images_processed=len(processed_images),
+            total_images_failed=len(failed_images),
+            total_faces=total_faces,
+            processed_images=processed_images,
+            failed_images=failed_images
+        )
+
+    except Exception as e:
+        update_job_status(job_id, JobStatus.FAILED, error=str(e))
 
     finally:
-        os.remove(zip_path)  # cleanup disk
+        # Always delete temp ZIP file
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+
 
 
 
