@@ -196,136 +196,73 @@ def upload_to_s3(image_bytes: bytes, original_filename: str) -> str:
 
 
 # ===================== Background ZIP Processing =====================
-
-async def process_zip_in_background(job_id: str, zip_content: bytes):
-    """
-    Background task:
-    - Unzips
-    - For each image: extract face embeddings, upload to S3
-    - Adds to FAISS index
-    """
+async def process_zip_in_background(job_id: str, zip_path: str):
     try:
         update_job_status(job_id, JobStatus.PROCESSING, progress=0)
 
-        processed_images = []
-        failed_images = []
-        total_faces = 0
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            all_files = [f for f in zip_ref.namelist() if f.lower().endswith((".jpg", ".jpeg", ".png"))]
 
-        with zipfile.ZipFile(io.BytesIO(zip_content)) as zip_ref:
-            image_files = [
-                f for f in zip_ref.namelist()
-                if not f.endswith('/')
-                and not f.startswith('__MACOSX')
-                and not f.startswith('.')
-                and f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp'))
-            ]
-
-            total_files = len(image_files)
-            print(f"Job {job_id}: Processing {total_files} images")
-
-            for idx, filename in enumerate(image_files):
+            for idx, filename in enumerate(all_files):
                 try:
-                    image_bytes = zip_ref.read(filename)
+                    with zip_ref.open(filename) as img_file:
+                        image_bytes = img_file.read()
 
-                    embeddings = extract_face_embeddings(image_bytes)
-
-                    if not embeddings:
-                        failed_images.append({
-                            'filename': filename,
-                            'reason': 'No faces detected'
-                        })
-                        continue
-
-                    s3_url = upload_to_s3(image_bytes, filename)
-
-                    # Add each face embedding to FAISS index
-                    for emb_idx, embedding in enumerate(embeddings):
-                        # embedding is already normalized; IP index => cosine similarity
-                        emb_vec = embedding.reshape(1, -1)
-                        index.add(emb_vec)
-
-                        metadata.append({
-                            'image_url': s3_url,
-                            'original_filename': os.path.basename(filename),
-                            'uploaded_at': datetime.now().isoformat(),
-                            'face_count': len(embeddings),
-                            'face_index': emb_idx,
-                            'job_id': job_id
-                        })
-                        total_faces += 1
-
-                    processed_images.append({
-                        'filename': os.path.basename(filename),
-                        's3_url': s3_url,
-                        'faces_detected': len(embeddings)
-                    })
-
-                    progress = int((idx + 1) / total_files * 100)
-                    update_job_status(job_id, JobStatus.PROCESSING, progress=progress)
+                    # process image embeddings, add to FAISS, etc.
 
                 except Exception as e:
-                    failed_images.append({
-                        'filename': filename,
-                        'reason': str(e)
-                    })
+                    # handle failed images
 
-            if total_faces > 0:
-                save_index()
+                    update_job_status(job_id, JobStatus.PROCESSING, progress=int((idx+1)/len(all_files)*100))
 
-            update_job_status(
-                job_id,
-                JobStatus.COMPLETED,
-                progress=100,
-                total_images_processed=len(processed_images),
-                total_images_failed=len(failed_images),
-                total_faces=total_faces,
-                processed_images=processed_images,
-                failed_images=failed_images
-            )
+        update_job_status(job_id, JobStatus.COMPLETED)
 
-            print(f"Job {job_id}: Completed - {total_faces} faces")
+    finally:
+        os.remove(zip_path)  # cleanup disk
 
-    except Exception as e:
-        print(f"Job {job_id}: Failed - {str(e)}")
-        update_job_status(job_id, JobStatus.FAILED, error=str(e))
 
 
 # ===================== FACE RECOGNITION ENDPOINTS =====================
-
 @app.post("/upload-faces")
 async def upload_faces(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
-    """
-    Upload a .zip file containing face images.
-    - Returns job_id immediately.
-    - Images are processed in the background.
-    """
-    if not file.filename.endswith('.zip'):
-        raise HTTPException(status_code=400, detail="File must be a .zip")
+    if not file.filename.endswith(".zip"):
+        raise HTTPException(status_code=400, detail="File must be a ZIP file")
 
     try:
         job_id = str(uuid.uuid4())
-        zip_content = await file.read()
+        zip_path = f"/tmp/{job_id}.zip"
 
+        # SAVE ZIP IN CHUNKS (NOT IN RAM)
+        with open(zip_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024 * 2)  # 2MB chunks
+                if not chunk:
+                    break
+                f.write(chunk)
+
+        # Register job
         jobs[job_id] = {
-            'job_id': job_id,
-            'status': JobStatus.PENDING,
-            'filename': file.filename,
-            'created_at': datetime.now().isoformat(),
-            'updated_at': datetime.now().isoformat(),
-            'progress': 0
+            "job_id": job_id,
+            "status": JobStatus.PENDING,
+            "filename": file.filename,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "progress": 0,
+            "zip_path": zip_path
         }
         save_jobs()
 
-        background_tasks.add_task(process_zip_in_background, job_id, zip_content)
+        background_tasks.add_task(process_zip_in_background, job_id, zip_path)
 
-        return JSONResponse({
-            'status': 'success',
-            'message': 'Upload received. Processing in background.',
-            'job_id': job_id
-        })
+        return {
+            "status": "received",
+            "job_id": job_id,
+            "message": "Upload complete. Processing started."
+        }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
+
 
 
 @app.get("/job-status/{job_id}")
