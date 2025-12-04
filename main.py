@@ -23,6 +23,11 @@ from insightface.app import FaceAnalysis
 # Import CSV handler
 from csv_handler import CSVHandler
 
+import hashlib
+# from functools import lru_cache
+
+search_cache = {}
+
 load_dotenv()
 
 app = FastAPI()
@@ -350,7 +355,7 @@ async def list_jobs():
     })
 
 
-@app.post("/search-face")
+@app.post("/search-face-no-cache")
 async def search_face(
     file: UploadFile = File(...),
     top_k: int = 20,
@@ -483,6 +488,121 @@ async def search_face(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+def hash_embedding(emb: np.ndarray) -> str:
+    """Hash embedding to detect repeated queries."""
+    return hashlib.md5(emb.tobytes()).hexdigest()
+
+
+def resize_for_detection(rgb):
+    """Downscale large images for faster face detection."""
+    h, w = rgb.shape[:2]
+    scale = min(640 / h, 640 / w, 1.0)
+    if scale < 1.0:
+        rgb = cv2.resize(rgb, (int(w * scale), int(h * scale)))
+    return rgb
+
+@app.post("/search-face")
+async def search_face(
+    file: UploadFile = File(...),
+    top_k: int = 20,
+    similarity_threshold: float = 0.4
+):
+    """Optimized search-face endpoint with caching + faster FAISS search."""
+    if index.ntotal == 0:
+        raise HTTPException(status_code=400, detail="No faces in database")
+
+    try:
+        image_bytes = await file.read()
+
+        # Load + validate image
+        try:
+            image = Image.open(io.BytesIO(image_bytes))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid image file")
+
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+
+        rgb = np.array(image)
+        rgb = resize_for_detection(rgb)  # 🔥 Speed boost for detection
+
+        # Extract embeddings
+        embeddings = extract_face_embeddings_from_rgb(rgb)
+        if not embeddings:
+            raise HTTPException(status_code=400, detail="No face detected")
+
+        # Use only first face for search (as before)
+        query_emb = embeddings[0]
+
+        # ------------ 🔥 CACHING LOGIC ------------
+        emb_hash = hash_embedding(query_emb)
+
+        if emb_hash in search_cache:
+            cached = search_cache[emb_hash]
+
+            # If user asks for equal or smaller top_k → return cached
+            if cached["top_k"] >= top_k:
+                return cached["result"]
+
+        # ------------ 🔥 Batch FAISS Search ------------
+        # Even though we have 1 face, batching speeds up FAISS
+        query_batch = np.stack([query_emb]).astype('float32')
+
+        # Reduce FAISS workload
+        k = min(top_k, index.ntotal)
+
+        similarities, indices = index.search(query_batch, k)
+
+        results = []
+        seen_urls = set()
+
+        # Single row (query_batch size = 1)
+        for sim, idx_val in zip(similarities[0], indices[0]):
+            if idx_val < 0 or idx_val >= len(metadata):
+                continue
+            if sim < similarity_threshold:
+                continue
+
+            item = metadata[idx_val]
+            url = item["image_url"]
+            if url in seen_urls:
+                continue
+
+            seen_urls.add(url)
+            results.append({
+                "image_url": url,
+                "original_filename": item["original_filename"],
+                "similarity_score": float(sim),
+                "distance": float(1.0 - sim),
+                "uploaded_at": item["uploaded_at"]
+            })
+
+        # ------------ 🔥 Sort only once (fast) ------------
+        results.sort(key=lambda x: x["similarity_score"], reverse=True)
+        results = results[:top_k]
+
+        response_data = {
+            "status": "success",
+            "query_faces_detected": len(embeddings),
+            "total_matches": len(results),
+            "similarity_threshold": similarity_threshold,
+            "results": results
+        }
+
+        # ------------ 🔥 Save to cache ------------
+        search_cache[emb_hash] = {
+            "top_k": top_k,
+            "result": response_data
+        }
+
+        return response_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
 
 
 @app.get("/stats")
