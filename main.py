@@ -31,7 +31,7 @@ search_cache = {}
 load_dotenv()
 
 app = FastAPI()
-
+VIDEO_CACHE_PATH = "video_cache.json"
 # ===================== CORS =====================
 
 # app.add_middleware(
@@ -290,6 +290,23 @@ async def process_zip_in_background(job_id: str, zip_path: str):
         # Always delete temp ZIP file
         if os.path.exists(zip_path):
             os.remove(zip_path)
+
+
+
+def load_video_cache():
+    if os.path.exists(VIDEO_CACHE_PATH) and os.path.getsize(VIDEO_CACHE_PATH) > 2:
+        try:
+            with open(VIDEO_CACHE_PATH, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_video_cache(cache: dict):
+    with open(VIDEO_CACHE_PATH, "w") as f:
+        json.dump(cache, f)
+
+video_cache = load_video_cache()
 
 
 
@@ -781,6 +798,50 @@ async def open_csv(csv_file: str):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading CSV: {e}")
+
+
+
+@app.get("/get-video-url/{ada_no}")
+async def get_video_url(ada_no: str):
+    """
+    Return the S3 video URL for ada_no.
+    Uses persistent caching to avoid repeated S3 calls.
+    """
+    # ---------- CACHE CHECK ----------
+    if ada_no in video_cache:
+        return {
+            "status": "success",
+            "cached": True,
+            "ada_no": ada_no,
+            "video_url": video_cache[ada_no]
+        }
+
+    # ---------- BUILD S3 KEY ----------
+    s3_key = f"amway_videos/{ada_no}.mp4"
+
+    # ---------- CHECK IF FILE EXISTS IN S3 ----------
+    try:
+        s3_client.head_object(Bucket=S3_BUCKET, Key=s3_key)
+    except Exception:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Video not found for ADA No: {ada_no}"
+        )
+
+    # ---------- BUILD PUBLIC URL ----------
+    video_url = f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{s3_key}"
+
+    # ---------- SAVE TO CACHE (RAM + FILE) ----------
+    video_cache[ada_no] = video_url
+    save_video_cache(video_cache)
+
+    return {
+        "status": "success",
+        "cached": False,
+        "ada_no": ada_no,
+        "video_url": video_url
+    }
+
 
 
 # ===================== MAIN =====================
