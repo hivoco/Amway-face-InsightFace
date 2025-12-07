@@ -519,6 +519,107 @@ def resize_for_detection(rgb):
         rgb = cv2.resize(rgb, (int(w * scale), int(h * scale)))
     return rgb
 
+# @app.post("/search-face")
+# async def search_face(
+#     file: UploadFile = File(...),
+#     top_k: int = 20,
+#     similarity_threshold: float = 0.4
+# ):
+#     """Optimized search-face endpoint with caching + faster FAISS search."""
+#     if index.ntotal == 0:
+#         raise HTTPException(status_code=400, detail="No faces in database")
+
+#     try:
+#         image_bytes = await file.read()
+
+#         # Load + validate image
+#         try:
+#             image = Image.open(io.BytesIO(image_bytes))
+#         except Exception:
+#             raise HTTPException(status_code=400, detail="Invalid image file")
+
+#         if image.mode != 'RGB':
+#             image = image.convert('RGB')
+
+#         rgb = np.array(image)
+#         rgb = resize_for_detection(rgb)  # 🔥 Speed boost for detection
+
+#         # Extract embeddings
+#         embeddings = extract_face_embeddings_from_rgb(rgb)
+#         if not embeddings:
+#             raise HTTPException(status_code=400, detail="No face detected")
+
+#         # Use only first face for search (as before)
+#         query_emb = embeddings[0]
+
+#         # ------------ 🔥 CACHING LOGIC ------------
+#         emb_hash = hash_embedding(query_emb)
+
+#         if emb_hash in search_cache:
+#             cached = search_cache[emb_hash]
+
+#             # If user asks for equal or smaller top_k → return cached
+#             if cached["top_k"] >= top_k:
+#                 return cached["result"]
+
+#         # ------------ 🔥 Batch FAISS Search ------------
+#         # Even though we have 1 face, batching speeds up FAISS
+#         query_batch = np.stack([query_emb]).astype('float32')
+
+#         # Reduce FAISS workload
+#         k = min(top_k, index.ntotal)
+
+#         similarities, indices = index.search(query_batch, k)
+
+#         results = []
+#         seen_urls = set()
+
+#         # Single row (query_batch size = 1)
+#         for sim, idx_val in zip(similarities[0], indices[0]):
+#             if idx_val < 0 or idx_val >= len(metadata):
+#                 continue
+#             if sim < similarity_threshold:
+#                 continue
+
+#             item = metadata[idx_val]
+#             url = item["image_url"]
+#             if url in seen_urls:
+#                 continue
+
+#             seen_urls.add(url)
+#             results.append({
+#                 "image_url": url,
+#                 "original_filename": item["original_filename"],
+#                 "similarity_score": float(sim),
+#                 "distance": float(1.0 - sim),
+#                 "uploaded_at": item["uploaded_at"]
+#             })
+
+#         # ------------ 🔥 Sort only once (fast) ------------
+#         results.sort(key=lambda x: x["similarity_score"], reverse=True)
+#         results = results[:top_k]
+
+#         response_data = {
+#             "status": "success",
+#             "query_faces_detected": len(embeddings),
+#             "total_matches": len(results),
+#             "similarity_threshold": similarity_threshold,
+#             "results": results
+#         }
+
+#         # ------------ 🔥 Save to cache ------------
+#         search_cache[emb_hash] = {
+#             "top_k": top_k,
+#             "result": response_data
+#         }
+
+#         return response_data
+
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
 @app.post("/search-face")
 async def search_face(
     file: UploadFile = File(...),
@@ -542,39 +643,31 @@ async def search_face(
             image = image.convert('RGB')
 
         rgb = np.array(image)
-        rgb = resize_for_detection(rgb)  # 🔥 Speed boost for detection
+        rgb = resize_for_detection(rgb)
 
         # Extract embeddings
         embeddings = extract_face_embeddings_from_rgb(rgb)
         if not embeddings:
             raise HTTPException(status_code=400, detail="No face detected")
 
-        # Use only first face for search (as before)
         query_emb = embeddings[0]
-
-        # ------------ 🔥 CACHING LOGIC ------------
         emb_hash = hash_embedding(query_emb)
 
         if emb_hash in search_cache:
             cached = search_cache[emb_hash]
-
-            # If user asks for equal or smaller top_k → return cached
             if cached["top_k"] >= top_k:
                 return cached["result"]
 
-        # ------------ 🔥 Batch FAISS Search ------------
-        # Even though we have 1 face, batching speeds up FAISS
         query_batch = np.stack([query_emb]).astype('float32')
-
-        # Reduce FAISS workload
-        k = min(top_k, index.ntotal)
-
+        
+        # 🔥 Request more results to account for deleted items
+        k = min(top_k * 3, index.ntotal)  # Get 3x more to filter deleted
+        
         similarities, indices = index.search(query_batch, k)
 
         results = []
         seen_urls = set()
 
-        # Single row (query_batch size = 1)
         for sim, idx_val in zip(similarities[0], indices[0]):
             if idx_val < 0 or idx_val >= len(metadata):
                 continue
@@ -582,6 +675,11 @@ async def search_face(
                 continue
 
             item = metadata[idx_val]
+            
+            # 🔥 CRITICAL: Skip deleted items
+            if item.get('deleted', False):
+                continue
+            
             url = item["image_url"]
             if url in seen_urls:
                 continue
@@ -594,8 +692,11 @@ async def search_face(
                 "distance": float(1.0 - sim),
                 "uploaded_at": item["uploaded_at"]
             })
+            
+            # 🔥 Stop once we have enough results
+            if len(results) >= top_k:
+                break
 
-        # ------------ 🔥 Sort only once (fast) ------------
         results.sort(key=lambda x: x["similarity_score"], reverse=True)
         results = results[:top_k]
 
@@ -607,7 +708,6 @@ async def search_face(
             "results": results
         }
 
-        # ------------ 🔥 Save to cache ------------
         search_cache[emb_hash] = {
             "top_k": top_k,
             "result": response_data
@@ -619,8 +719,6 @@ async def search_face(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
-
-
 
 @app.get("/stats")
 async def get_stats():
@@ -842,6 +940,77 @@ async def get_video_url(ada_no: str):
         "video_url": video_url
     }
 
+
+@app.delete("/delete-today-uploads")
+async def delete_today_uploads():
+    """
+    Delete all images uploaded today.
+    Removes from S3, marks as deleted in metadata.
+    """
+    try:
+        today = datetime.now().date().isoformat()  # "2024-12-07"
+        
+        # 1. Find all metadata entries uploaded today
+        today_items = [
+            (i, item) for i, item in enumerate(metadata)
+            if item.get('uploaded_at', '').startswith(today)
+        ]
+        
+        if not today_items:
+            return {
+                'status': 'no_data',
+                'message': f"No images uploaded today ({today})",
+                'total_deleted': 0
+            }
+        
+        deleted_images = set()
+        deleted_faces = 0
+        affected_jobs = set()
+        
+        # 2. Delete from S3 and mark as deleted
+        for idx, item in today_items:
+            image_url = item['image_url']
+            
+            # Delete from S3 (only once per unique image)
+            if image_url not in deleted_images:
+                try:
+                    s3_key = image_url.split(f"{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/")[1]
+                    s3_client.delete_object(Bucket=S3_BUCKET, Key=s3_key)
+                    deleted_images.add(image_url)
+                except Exception as e:
+                    print(f"S3 delete failed for {image_url}: {e}")
+            
+            # Mark as deleted in metadata
+            metadata[idx]['deleted'] = True
+            metadata[idx]['deleted_at'] = datetime.now().isoformat()
+            deleted_faces += 1
+            
+            # Track affected jobs
+            if 'job_id' in item:
+                affected_jobs.add(item['job_id'])
+        
+        # 3. Save metadata
+        save_index()
+        
+        # 4. Update job statuses
+        for job_id in affected_jobs:
+            if job_id in jobs:
+                jobs[job_id]['status'] = 'deleted'
+                jobs[job_id]['deleted_at'] = datetime.now().isoformat()
+        save_jobs()
+        
+        return {
+            'status': 'success',
+            'date': today,
+            'total_faces_deleted': deleted_faces,
+            'unique_images_deleted': len(deleted_images),
+            'affected_jobs': len(affected_jobs),
+            'deleted_images': list(deleted_images)[:10],  # Show first 10
+            'note': 'Items marked as deleted. Run /rebuild-index to fully clean FAISS index.'
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
 
 
 # ===================== MAIN =====================
