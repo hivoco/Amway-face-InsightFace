@@ -34,13 +34,13 @@ app = FastAPI()
 VIDEO_CACHE_PATH = "video_cache.json"
 # ===================== CORS =====================
 
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=["*"],
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ===================== CONFIG =====================
 
@@ -899,46 +899,150 @@ async def open_csv(csv_file: str):
 
 
 
-@app.get("/get-video-url/{ada_no}")
-async def get_video_url(ada_no: str):
+# @app.get("/get-video-url/{ada_no}")
+# async def get_video_url(ada_no: str):
+#     """
+#     Return the S3 video URL for ada_no.
+#     Uses persistent caching to avoid repeated S3 calls.
+#     """
+#     # ---------- CACHE CHECK ----------
+#     if ada_no in video_cache:
+#         return {
+#             "status": "success",
+#             "cached": True,
+#             "ada_no": ada_no,
+#             "video_url": video_cache[ada_no]
+#         }
+
+#     # ---------- BUILD S3 KEY ----------
+#     s3_key = f"amway_videos/{ada_no}.mp4"
+
+#     # ---------- CHECK IF FILE EXISTS IN S3 ----------
+#     try:
+#         s3_client.head_object(Bucket=S3_BUCKET, Key=s3_key)
+#     except Exception:
+#         raise HTTPException(
+#             status_code=404,
+#             detail=f"Video not found for ADA No: {ada_no}"
+#         )
+
+#     # ---------- BUILD PUBLIC URL ----------
+#     video_url = f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{s3_key}"
+
+#     # ---------- SAVE TO CACHE (RAM + FILE) ----------
+#     video_cache[ada_no] = video_url
+#     save_video_cache(video_cache)
+
+#     return {
+#         "status": "success",
+#         "cached": False,
+#         "ada_no": ada_no,
+#         "video_url": video_url
+#     }
+
+
+@app.get("/get-video-url/{mobile_number}")
+async def get_video_url(mobile_number: str):
     """
-    Return the S3 video URL for ada_no.
+    Return the S3 video URL for mobile_number.
+    Searches for videos with flexible matching (handles +91, +1, etc. prefixes).
     Uses persistent caching to avoid repeated S3 calls.
     """
+    # ---------- CLEAN INPUT ----------
+    # Remove any spaces, + signs from input
+    clean_mobile = mobile_number.replace(" ", "").replace("+", "")
+    
     # ---------- CACHE CHECK ----------
-    if ada_no in video_cache:
+    if clean_mobile in video_cache:
         return {
             "status": "success",
             "cached": True,
-            "ada_no": ada_no,
-            "video_url": video_cache[ada_no]
+            "mobile_number": mobile_number,
+            "video_url": video_cache[clean_mobile]
         }
-
-    # ---------- BUILD S3 KEY ----------
-    s3_key = f"amway_videos/{ada_no}.mp4"
-
-    # ---------- CHECK IF FILE EXISTS IN S3 ----------
+    
+    # ---------- BUILD SEARCH PATTERNS ----------
+    # Try different possible filename patterns
+    possible_patterns = [
+        f"{clean_mobile}.mp4",           # 6788525231.mp4
+        f"+{clean_mobile}.mp4",          # +6788525231.mp4
+        f"+91{clean_mobile}.mp4",        # +916788525231.mp4
+        f"+1{clean_mobile}.mp4",         # +16788525231.mp4
+        f"91{clean_mobile}.mp4",         # 916788525231.mp4
+        f"1{clean_mobile}.mp4",          # 16788525231.mp4
+    ]
+    
+    # Also check if the mobile number is contained within any filename
+    # (handles cases like +91 6788525231.mp4 with space)
+    
+    s3_folder = "amway_videos/phuket/Amway REELS/"
+    
+    # ---------- SEARCH IN S3 ----------
     try:
-        s3_client.head_object(Bucket=S3_BUCKET, Key=s3_key)
-    except Exception:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Video not found for ADA No: {ada_no}"
+        # List all files in the folder
+        response = s3_client.list_objects_v2(
+            Bucket=S3_BUCKET,
+            Prefix=s3_folder
         )
-
-    # ---------- BUILD PUBLIC URL ----------
-    video_url = f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{s3_key}"
-
-    # ---------- SAVE TO CACHE (RAM + FILE) ----------
-    video_cache[ada_no] = video_url
-    save_video_cache(video_cache)
-
-    return {
-        "status": "success",
-        "cached": False,
-        "ada_no": ada_no,
-        "video_url": video_url
-    }
+        
+        if 'Contents' not in response:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No videos found in folder"
+            )
+        
+        found_key = None
+        
+        # First try exact matches
+        for pattern in possible_patterns:
+            test_key = f"{s3_folder}{pattern}"
+            for obj in response['Contents']:
+                if obj['Key'] == test_key:
+                    found_key = obj['Key']
+                    break
+            if found_key:
+                break
+        
+        # If not found, try substring match (mobile number appears continuously in filename)
+        if not found_key:
+            for obj in response['Contents']:
+                filename = obj['Key'].split('/')[-1]  # Get just the filename
+                # Remove all non-digits from filename
+                filename_digits = ''.join(c for c in filename if c.isdigit())
+                
+                # Check if the mobile number appears as continuous digits
+                if clean_mobile in filename_digits:
+                    found_key = obj['Key']
+                    break
+        
+        if not found_key:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Video not found for mobile number: {mobile_number}"
+            )
+        
+        # ---------- BUILD PUBLIC URL ----------
+        video_url = f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/{found_key}"
+        
+        # ---------- SAVE TO CACHE (RAM + FILE) ----------
+        video_cache[clean_mobile] = video_url
+        save_video_cache(video_cache)
+        
+        return {
+            "status": "success",
+            "cached": False,
+            "mobile_number": mobile_number,
+            "matched_filename": found_key.split('/')[-1],
+            "video_url": video_url
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error searching for video: {str(e)}"
+        )
 
 
 @app.delete("/delete-today-uploads")
